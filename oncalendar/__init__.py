@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from calendar import monthrange
 from datetime import date, datetime, time
 from datetime import timedelta as td
@@ -10,6 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 UTC = timezone.utc
 
 # systemd seems to stop iteration when it reaches year 2200. We do the same.
+MIN_YEAR = 1970
 MAX_YEAR = 2200
 RANGES = [
     range(0, 7),
@@ -193,25 +195,8 @@ def is_imaginary(dt: datetime) -> bool:
     return dt != dt.astimezone(UTC).astimezone(dt.tzinfo)
 
 
-class BaseIterator(object):
-    """OnCalendar expression parser and iterator.
-
-    This iterator supports most syntax features supported by systemd. It however
-    does *not* support:
-
-    * Timezone specified within the expression (use `TzIterator` instead).
-    * Seconds fields with decimal values.
-
-    This iterator works with both naive and timezone-aware datetimes. In case
-    of timezone-aware datetimes, it mimics systemd behaviour during DST transitions:
-
-    * It skips over datetimes that fall in the skipped hour during the spring DST
-      transition.
-    * It repeats the datetimes that fall in the repeated hour during the fall DST
-      transition. It returns a datetime with the pre-transition timezone,
-      then the same datetime but with the post-transition timezone.
-    """
-
+class BaseIterator(ABC):
+    """Base class for OnCalendar expression parsers and iterators."""
     def __init__(self, expression: str, start: datetime):
         """Initialize the iterator with an OnCalendar expression and the start time.
 
@@ -284,6 +269,56 @@ class BaseIterator(object):
 
         self.any_reverse_day = any(d < 0 for d in self.days)
 
+    def match_dom(self, d: date) -> bool:
+        """Return True is day-of-month matches."""
+        if d.day in self.days:
+            return True
+
+        if self.any_reverse_day:
+            _, last = monthrange(d.year, d.month)
+            if d.day - last - 1 in self.days:
+                return True
+
+        return False
+
+    def match_dow(self, d: date) -> bool:
+        """Return True is day-of-week matches."""
+
+        return d.weekday() in self.weekdays
+
+    def __iter__(self) -> "BaseIterator":
+        return self
+
+    @abstractmethod
+    def __next__(self) -> datetime:
+        """
+        This method must be implemented by subclasses.
+        It should return the next element in the iteration.
+        If there are no more elements, it should raise StopIteration.
+        """
+        pass
+
+
+class ForwardIterator(BaseIterator):
+    """OnCalendar expression parser and iterator for calculating future events.
+
+    Calculates the next occurrence of an event in the future.
+
+    This iterator supports most syntax features supported by systemd. It however
+    does *not* support:
+
+    * Timezone specified within the expression (use `TzIterator` instead).
+    * Seconds fields with decimal values.
+
+    This iterator works with both naive and timezone-aware datetimes. In case
+    of timezone-aware datetimes, it mimics systemd behaviour during DST transitions:
+
+    * It skips over datetimes that fall in the skipped hour during the spring DST
+      transition.
+    * It repeats the datetimes that fall in the repeated hour during the fall DST
+      transition. It returns a datetime with the pre-transition timezone,
+      then the same datetime but with the post-transition timezone.
+    """
     def advance_second(self) -> bool:
         """Roll forward the second component until it satisfies the constraints.
 
@@ -350,23 +385,6 @@ class BaseIterator(object):
 
         return True
 
-    def match_dom(self, d: date) -> bool:
-        """Return True is day-of-month matches."""
-        if d.day in self.days:
-            return True
-
-        if self.any_reverse_day:
-            _, last = monthrange(d.year, d.month)
-            if d.day - last - 1 in self.days:
-                return True
-
-        return False
-
-    def match_dow(self, d: date) -> bool:
-        """Return True is day-of-week matches."""
-
-        return d.weekday() in self.weekdays
-
     def advance_day(self) -> bool:
         """Roll forward the day component until it satisfies the constraints.
 
@@ -427,9 +445,6 @@ class BaseIterator(object):
 
         self.dt = datetime.combine(needle, time(), tzinfo=self.dt.tzinfo)
 
-    def __iter__(self) -> "BaseIterator":
-        return self
-
     def __next__(self) -> datetime:
         self.dt += SECOND
 
@@ -468,6 +483,190 @@ class BaseIterator(object):
             return self.dt
 
 
+class BackwardIterator(BaseIterator):
+    """OnCalendar expression parser and iterator for calculating past events.
+
+    Calculates the previous occurrence of an event in the past.
+
+    This iterator supports most syntax features supported by systemd. It however
+    does *not* support:
+
+    * Timezone specified within the expression (use `TzIterator` instead).
+    * Seconds fields with decimal values.
+
+    This iterator works with both naive and timezone-aware datetimes. In case
+    of timezone-aware datetimes, it mimics systemd behaviour during DST transitions:
+
+    * It skips over datetimes that fall in the skipped hour during the spring DST
+      transition.
+    * It repeats the datetimes that fall in the repeated hour during the fall DST
+      transition. It returns a datetime with the pre-transition timezone,
+      then the same datetime but with the post-transition timezone.
+    """
+    def reverse_second(self) -> bool:
+        """Roll backward the second component until it satisfies the constraints.
+
+        Return False if the second meets contraints without modification.
+        Return True if self.dt was rolled backward.
+
+        """
+
+        if self.dt.second in self.seconds:
+            return False
+
+        if len(self.seconds) == 1:
+            # An optimization for the special case where self.seconds has exactly
+            # one element. Instead of advancing one second per iteration,
+            # make a jump from the current second to the target second.
+            delta = (self.dt.second - next(iter(self.seconds))) % 60
+            self.dt -= td(seconds=delta)
+
+        while self.dt.second not in self.seconds:
+            self.dt -= SECOND
+            if self.dt.second == 59:
+                # Break out to re-check year, month, day, hour, and minute
+                break
+
+        return True
+
+    def reverse_minute(self) -> bool:
+        """Roll backward the minute component until it satisfies the constraints.
+
+        Return False if the minute meets contraints without modification.
+        Return True if self.dt was rolled backward.
+
+        """
+
+        if self.dt.minute in self.minutes:
+            return False
+
+        self.dt = self.dt.replace(second=59)
+        while self.dt.minute not in self.minutes:
+            self.dt -= MINUTE
+            if self.dt.minute == 59:
+                # Break out to re-check year, month, day and hour
+                break
+
+        return True
+
+    def reverse_hour(self) -> bool:
+        """Roll backward the hour component until it satisfies the constraints.
+
+        Return False if the hour meets contraints without modification.
+        Return True if self.dt was rolled backward.
+
+        """
+
+        if self.dt.hour in self.hours:
+            return False
+
+        self.dt = self.dt.replace(minute=59, second=59)
+        while self.dt.hour not in self.hours:
+            self.dt -= HOUR
+            if self.dt.hour == 23:
+                # break out to re-check year, month and day
+                break
+
+        return True
+
+    def reverse_day(self) -> bool:
+        """Roll backward the day component until it satisfies the constraints.
+
+        This method advances the date until it matches the
+        day-of-week and the day-of-month constraints.
+
+        Return False if the day meets contraints without modification.
+        Return True if self.dt was rolled backward.
+
+        """
+
+        needle = self.dt.date()
+        if self.match_dow(needle) and self.match_dom(needle):
+            return False
+
+        _, last_day = monthrange(self.dt.year, self.dt.month)
+        while not self.match_dow(needle) or not self.match_dom(needle):
+            needle -= td(days=1)
+            if needle.day == last_day:
+                # We're in a different month now, break out to re-check year and month
+                break
+
+        self.dt = datetime.combine(needle, time(23, 59, 59), tzinfo=self.dt.tzinfo)
+        return True
+
+    def reverse_month(self) -> bool:
+        """Roll backward the month component until it satisfies the constraints.
+
+        Return False if the month meets contraints without modification.
+        Return True if self.dt was rolled backward.
+
+        """
+
+        if self.dt.month in self.months:
+            return False
+
+        needle = self.dt.date()
+        while needle.month not in self.months:
+            needle = needle.replace(day=1) - td(days=1)
+
+        self.dt = datetime.combine(needle, time(23, 59, 59), tzinfo=self.dt.tzinfo)
+        return True
+
+    def reverse_year(self) -> None:
+        """Roll backward the year component until it satisfies the constraints.
+
+        Return False if the year meets contraints without modification.
+        Return True if self.dt was rolled backward.
+
+        """
+
+        if self.dt.year in self.years:
+            return
+
+        needle = self.dt.date()
+        while needle.year not in self.years and needle.year >= MIN_YEAR:
+            needle = needle.replace(year=needle.year - 1, month=12, day=31)
+
+        self.dt = datetime.combine(needle, time(23, 59, 59), tzinfo=self.dt.tzinfo)
+
+    def __next__(self) -> datetime:
+        self.dt -= SECOND
+        count = 0
+
+        while True:
+            self.reverse_year()
+
+            # systemd allows dates starting from 1970, so we do the same
+            if self.dt.year < MIN_YEAR:
+                raise StopIteration
+
+            if self.reverse_month():
+                continue
+
+            if self.reverse_day():
+                continue
+
+            if self.reverse_hour():
+                continue
+
+            if self.reverse_minute():
+                continue
+
+            if self.reverse_second():
+                continue
+
+            if self.fixup_tz:
+                result = self.dt.replace(tzinfo=self.fixup_tz, fold=0)
+                if is_imaginary(result):
+                    # If we hit an imaginary datetime then look for the next
+                    # occurence
+                    self.dt -= SECOND
+                    continue
+                return result
+
+            return self.dt
+
+
 def parse_tz(value: str) -> ZoneInfo | None:
     """Return ZoneInfo object or None if value fails to parse."""
     # Optimization: there are no timezones that start with a digit or star
@@ -488,7 +687,7 @@ class TzIterator(object):
     timezone-aware.
     """
 
-    def __init__(self, expression: str, start: datetime):
+    def __init__(self, expression: str, start: datetime, forward: bool=True) -> None:
         """Initialize the iterator with an OnCalendar expression and the start time.
 
         `expression` should contain a single OnCalendar expression with or without a
@@ -507,7 +706,8 @@ class TzIterator(object):
             if tz := parse_tz(maybe_tz):
                 expression, start = head, start.astimezone(tz)
 
-        self.iterator = BaseIterator(expression, start)
+        iter_cls = ForwardIterator if forward else BackwardIterator
+        self.iterator = iter_cls(expression, start)
 
     def __iter__(self) -> "TzIterator":
         return self
@@ -523,7 +723,7 @@ class OnCalendar(object):
     expressions (separated by newlines) at once.
     """
 
-    def __init__(self, expressions: str, start: datetime):
+    def __init__(self, expressions: str, start: datetime, forward: bool=True) -> None:
         """Initialize the iterator with OnCalendar expression(s) and the start time.
 
         `expressions` should contain one or more OnCalendar expressions with or without
@@ -538,16 +738,21 @@ class OnCalendar(object):
 
         self.dt = start
         self.iterators = {}
+        self.forward = forward
         for expr in expressions.strip().split("\n"):
-            self.iterators[TzIterator(expr, start.replace())] = start
+            self.iterators[TzIterator(expr, start.replace(), forward)] = start
 
     def __iter__(self) -> "OnCalendar":
         return self
 
     def __next__(self) -> datetime:
         for it in list(self.iterators.keys()):
-            if self.iterators[it] > self.dt:
-                continue
+            if self.forward:
+                if self.iterators[it] > self.dt:
+                    continue
+            else:
+                if self.iterators[it] < self.dt:
+                    continue
 
             try:
                 self.iterators[it] = next(it)
@@ -557,5 +762,6 @@ class OnCalendar(object):
         if not self.iterators:
             raise StopIteration
 
-        self.dt = min(self.iterators.values())
+        first_elem_fn = min if self.forward else max
+        self.dt = first_elem_fn(self.iterators.values())
         return self.dt
