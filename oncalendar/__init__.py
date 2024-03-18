@@ -1,14 +1,12 @@
-from __future__ import annotations
-
-from abc import ABC, abstractmethod
 from calendar import monthrange
 from datetime import date, datetime, time
 from datetime import timedelta as td
-from datetime import timezone
 from enum import IntEnum
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import pytz
 
-UTC = timezone.utc
+
+UTC = pytz.utc
+
 
 # systemd seems to stop iteration when it reaches year 2200. We do the same.
 MIN_YEAR = 1970
@@ -65,10 +63,10 @@ class Field(IntEnum):
     MINUTE = 5
     SECOND = 6
 
-    def msg(self) -> str:
+    def msg(self):
         return "Bad %s" % FIELD_NAMES[self]
 
-    def _int(self, value: str) -> int:
+    def _int(self, value):
         if value == "":
             raise OnCalendarError(self.msg())
         # Make sure the value contains digits and nothing else
@@ -79,7 +77,7 @@ class Field(IntEnum):
 
         return int(value)
 
-    def int(self, s: str) -> int:
+    def int(self, s):
         """Convert the supplied sting to an integer.
 
         This function handles a few special cases:
@@ -94,10 +92,10 @@ class Field(IntEnum):
         if self == Field.DOW:
             s = s.upper()
             if s in SYMBOLIC_DAYS:
-                # Monday -> 0, ..., Sunday -> 6
+                # Monday6
                 return SYMBOLIC_DAYS.index(s)
             if s in SYMBOLIC_DAYS_SHORT:
-                # Mon -> 0, ..., Sun -> 6
+                # Mon6
                 return SYMBOLIC_DAYS_SHORT.index(s)
             raise OnCalendarError(self.msg())
 
@@ -114,7 +112,7 @@ class Field(IntEnum):
 
         return v
 
-    def parse(self, s: str, reverse: bool = False) -> set[__builtins__.int]:
+    def parse(self, s, reverse = False):
         """Parse a single component of an expression into a set of integers.
 
         To handle lists, intervals, and intervals with a step, this function
@@ -149,7 +147,7 @@ class Field(IntEnum):
             return result
 
         if "/" in s and self != Field.DOW:
-            term, step_str = s.split("/", maxsplit=1)
+            term, step_str = s.split("/", 1)
             step = self._int(step_str)
             if step == 0:
                 raise OnCalendarError(self.msg())
@@ -168,7 +166,7 @@ class Field(IntEnum):
             return set(sorted(items)[::step])
 
         if ".." in s:
-            start_str, end_str = s.split("..", maxsplit=1)
+            start_str, end_str = s.split("..", 1)
             start = self.int(start_str)
             end = self.int(end_str)
 
@@ -190,14 +188,14 @@ class Field(IntEnum):
         return {v}
 
 
-def is_imaginary(dt: datetime) -> bool:
+def is_imaginary(dt):
     """Return True if dt gets skipped over during DST transition."""
     return dt != dt.astimezone(UTC).astimezone(dt.tzinfo)
 
 
-class BaseIterator(ABC):
+class BaseIterator(object):
     """Base class for OnCalendar expression parsers and iterators."""
-    def __init__(self, expression: str, start: datetime):
+    def __init__(self, expression, start):
         """Initialize the iterator with an OnCalendar expression and the start time.
 
         `expression` should contain a single OnCalendar expression without a timezone,
@@ -269,7 +267,7 @@ class BaseIterator(ABC):
 
         self.any_reverse_day = any(d < 0 for d in self.days)
 
-    def match_dom(self, d: date) -> bool:
+    def match_dom(self, d):
         """Return True is day-of-month matches."""
         if d.day in self.days:
             return True
@@ -281,22 +279,21 @@ class BaseIterator(ABC):
 
         return False
 
-    def match_dow(self, d: date) -> bool:
+    def match_dow(self, d):
         """Return True is day-of-week matches."""
 
         return d.weekday() in self.weekdays
 
-    def __iter__(self) -> "BaseIterator":
+    def __iter__(self):
         return self
 
-    @abstractmethod
-    def __next__(self) -> datetime:
+    def next(self):
         """
         This method must be implemented by subclasses.
         It should return the next element in the iteration.
         If there are no more elements, it should raise StopIteration.
         """
-        pass
+        raise NotImplementedError
 
 
 class ForwardIterator(BaseIterator):
@@ -319,7 +316,7 @@ class ForwardIterator(BaseIterator):
       transition. It returns a datetime with the pre-transition timezone,
       then the same datetime but with the post-transition timezone.
     """
-    def advance_second(self) -> bool:
+    def advance_second(self):
         """Roll forward the second component until it satisfies the constraints.
 
         Return False if the second meets contraints without modification.
@@ -345,7 +342,7 @@ class ForwardIterator(BaseIterator):
 
         return True
 
-    def advance_minute(self) -> bool:
+    def advance_minute(self):
         """Roll forward the minute component until it satisfies the constraints.
 
         Return False if the minute meets contraints without modification.
@@ -365,7 +362,7 @@ class ForwardIterator(BaseIterator):
 
         return True
 
-    def advance_hour(self) -> bool:
+    def advance_hour(self):
         """Roll forward the hour component until it satisfies the constraints.
 
         Return False if the hour meets contraints without modification.
@@ -385,7 +382,7 @@ class ForwardIterator(BaseIterator):
 
         return True
 
-    def advance_day(self) -> bool:
+    def advance_day(self):
         """Roll forward the day component until it satisfies the constraints.
 
         This method advances the date until it matches the
@@ -407,10 +404,10 @@ class ForwardIterator(BaseIterator):
                 # This significantly speeds up the "0 0 * 2 MON#5" case
                 break
 
-        self.dt = datetime.combine(needle, time(), tzinfo=self.dt.tzinfo)
+        self.dt = datetime.combine(needle, time()).replace(tzinfo=self.dt.tzinfo)
         return True
 
-    def advance_month(self) -> bool:
+    def advance_month(self):
         """Roll forward the month component until it satisfies the constraints.
 
         Return False if the month meets contraints without modification.
@@ -425,10 +422,10 @@ class ForwardIterator(BaseIterator):
         while needle.month not in self.months:
             needle = (needle.replace(day=1) + td(days=32)).replace(day=1)
 
-        self.dt = datetime.combine(needle, time(), tzinfo=self.dt.tzinfo)
+        self.dt = datetime.combine(needle, time()).replace(tzinfo=self.dt.tzinfo)
         return True
 
-    def advance_year(self) -> None:
+    def advance_year(self):
         """Roll forward the year component until it satisfies the constraints.
 
         Return False if the year meets contraints without modification.
@@ -443,9 +440,9 @@ class ForwardIterator(BaseIterator):
         while needle.year not in self.years and needle.year < MAX_YEAR:
             needle = needle.replace(year=needle.year + 1, month=1, day=1)
 
-        self.dt = datetime.combine(needle, time(), tzinfo=self.dt.tzinfo)
+        self.dt = datetime.combine(needle, time()).replace(tzinfo=self.dt.tzinfo)
 
-    def __next__(self) -> datetime:
+    def next(self):
         self.dt += SECOND
 
         while True:
@@ -472,7 +469,7 @@ class ForwardIterator(BaseIterator):
                 continue
 
             if self.fixup_tz:
-                result = self.dt.replace(tzinfo=self.fixup_tz, fold=0)
+                result = self.dt.replace(tzinfo=self.fixup_tz)
                 if is_imaginary(result):
                     # If we hit an imaginary datetime then look for the next
                     # occurence
@@ -503,7 +500,19 @@ class BackwardIterator(BaseIterator):
       transition. It returns a datetime with the pre-transition timezone,
       then the same datetime but with the post-transition timezone.
     """
-    def reverse_second(self) -> bool:
+
+    def __init__(self, expression, start):
+        # The minimum resulution for the iterators is of one second. And when we instantiate
+        # an iterator we automatically round up its `start` by setting the microseconds part
+        # to zero. For this reason, when we evaluate backward in time, we must round up to
+        # the next second, and not to the previous one.
+        # This is due to the fact that the current implementation of the `next` methods is
+        # always, as very first step, moving the start point of the search one second
+        # ahead/behind.
+        start = start + SECOND
+        BaseIterator.__init__(self, expression, start)
+
+    def reverse_second(self):
         """Roll backward the second component until it satisfies the constraints.
 
         Return False if the second meets contraints without modification.
@@ -529,7 +538,7 @@ class BackwardIterator(BaseIterator):
 
         return True
 
-    def reverse_minute(self) -> bool:
+    def reverse_minute(self):
         """Roll backward the minute component until it satisfies the constraints.
 
         Return False if the minute meets contraints without modification.
@@ -549,7 +558,7 @@ class BackwardIterator(BaseIterator):
 
         return True
 
-    def reverse_hour(self) -> bool:
+    def reverse_hour(self):
         """Roll backward the hour component until it satisfies the constraints.
 
         Return False if the hour meets contraints without modification.
@@ -569,7 +578,7 @@ class BackwardIterator(BaseIterator):
 
         return True
 
-    def reverse_day(self) -> bool:
+    def reverse_day(self):
         """Roll backward the day component until it satisfies the constraints.
 
         This method advances the date until it matches the
@@ -591,10 +600,10 @@ class BackwardIterator(BaseIterator):
                 # We're in a different month now, break out to re-check year and month
                 break
 
-        self.dt = datetime.combine(needle, time(23, 59, 59), tzinfo=self.dt.tzinfo)
+        self.dt = datetime.combine(needle, time(23, 59, 59)).replace(tzinfo=self.dt.tzinfo)
         return True
 
-    def reverse_month(self) -> bool:
+    def reverse_month(self):
         """Roll backward the month component until it satisfies the constraints.
 
         Return False if the month meets contraints without modification.
@@ -609,10 +618,10 @@ class BackwardIterator(BaseIterator):
         while needle.month not in self.months:
             needle = needle.replace(day=1) - td(days=1)
 
-        self.dt = datetime.combine(needle, time(23, 59, 59), tzinfo=self.dt.tzinfo)
+        self.dt = datetime.combine(needle, time(23, 59, 59)).replace(tzinfo=self.dt.tzinfo)
         return True
 
-    def reverse_year(self) -> None:
+    def reverse_year(self):
         """Roll backward the year component until it satisfies the constraints.
 
         Return False if the year meets contraints without modification.
@@ -627,9 +636,9 @@ class BackwardIterator(BaseIterator):
         while needle.year not in self.years and needle.year >= MIN_YEAR:
             needle = needle.replace(year=needle.year - 1, month=12, day=31)
 
-        self.dt = datetime.combine(needle, time(23, 59, 59), tzinfo=self.dt.tzinfo)
+        self.dt = datetime.combine(needle, time(23, 59, 59)).replace(tzinfo=self.dt.tzinfo)
 
-    def __next__(self) -> datetime:
+    def next(self):
         self.dt -= SECOND
         count = 0
 
@@ -656,7 +665,7 @@ class BackwardIterator(BaseIterator):
                 continue
 
             if self.fixup_tz:
-                result = self.dt.replace(tzinfo=self.fixup_tz, fold=0)
+                result = self.dt.replace(tzinfo=self.fixup_tz)
                 if is_imaginary(result):
                     # If we hit an imaginary datetime then look for the next
                     # occurence
@@ -667,15 +676,15 @@ class BackwardIterator(BaseIterator):
             return self.dt
 
 
-def parse_tz(value: str) -> ZoneInfo | None:
+def parse_tz(value):
     """Return ZoneInfo object or None if value fails to parse."""
     # Optimization: there are no timezones that start with a digit or star
     if value[0] in "0123456789*":
         return None
 
     try:
-        return ZoneInfo(value)
-    except (ZoneInfoNotFoundError, ValueError):
+        return pytz.timezone(value)
+    except Exception:
         return None
 
 
@@ -687,7 +696,7 @@ class TzIterator(object):
     timezone-aware.
     """
 
-    def __init__(self, expression: str, start: datetime, forward: bool=True) -> None:
+    def __init__(self, expression, start, forward=True):
         """Initialize the iterator with an OnCalendar expression and the start time.
 
         `expression` should contain a single OnCalendar expression with or without a
@@ -702,17 +711,18 @@ class TzIterator(object):
         self.local_tz = start.tzinfo
         expression = expression.strip()
         if " " in expression:
-            head, maybe_tz = expression.rsplit(maxsplit=1)
-            if tz := parse_tz(maybe_tz):
+            head, maybe_tz = expression.rsplit(" ", 1)
+            tz = parse_tz(maybe_tz)
+            if tz:
                 expression, start = head, start.astimezone(tz)
 
         iter_cls = ForwardIterator if forward else BackwardIterator
         self.iterator = iter_cls(expression, start)
 
-    def __iter__(self) -> "TzIterator":
+    def __iter__(self):
         return self
 
-    def __next__(self) -> datetime:
+    def next(self):
         return next(self.iterator).astimezone(self.local_tz)
 
 
@@ -723,7 +733,7 @@ class OnCalendar(object):
     expressions (separated by newlines) at once.
     """
 
-    def __init__(self, expressions: str, start: datetime, forward: bool=True) -> None:
+    def __init__(self, expressions, start, forward=True):
         """Initialize the iterator with OnCalendar expression(s) and the start time.
 
         `expressions` should contain one or more OnCalendar expressions with or without
@@ -742,10 +752,10 @@ class OnCalendar(object):
         for expr in expressions.strip().split("\n"):
             self.iterators[TzIterator(expr, start.replace(), forward)] = start
 
-    def __iter__(self) -> "OnCalendar":
+    def __iter__(self):
         return self
 
-    def __next__(self) -> datetime:
+    def next(self):
         for it in list(self.iterators.keys()):
             if self.forward:
                 if self.iterators[it] > self.dt:
